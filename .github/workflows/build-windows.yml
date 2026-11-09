@@ -1,0 +1,88 @@
+name: Build XaeroSeed Windows GUI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - name: Check out GUI sources
+        uses: actions/checkout@v4
+
+      - name: Get original XaeroSeed sources
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/jaysyrk/xaeroseed.git engine
+          git clone --depth 1 https://github.com/Cubitect/cubiomes.git engine/vendor/cubiomes
+          Copy-Item gui.py engine/gui.py
+          Copy-Item README.md engine/GUI_README.md
+
+      - name: Fix Xaero 26.3 map block ID parsing
+        shell: pwsh
+        run: |
+          python patch_xaero_format.py engine/src/xaero_format.py
+          python -m py_compile engine/src/xaero_format.py
+          python patch_capture_native_output.py engine/xaeroseed.py
+          python -m py_compile engine/xaeroseed.py
+
+      - name: Install Windows C compiler
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+
+      - name: Compile native seed-cracking engine
+        shell: msys2 {0}
+        run: |
+          set -e
+          cd engine
+          mkdir -p build
+          gcc -O3 -Wall -Ivendor/cubiomes -o build/seedcrack.exe \
+            native/seedcrack.c \
+            vendor/cubiomes/finders.c vendor/cubiomes/generator.c \
+            vendor/cubiomes/biomenoise.c vendor/cubiomes/biomes.c \
+            vendor/cubiomes/layers.c vendor/cubiomes/noise.c \
+            vendor/cubiomes/util.c vendor/cubiomes/quadbase.c \
+            -static -pthread -lm
+          test -s build/seedcrack.exe
+          # Missing arguments must return exit code 2, not success/silence.
+          set +e
+          output=$(./build/seedcrack.exe 2>&1)
+          rc=$?
+          set -e
+          printf '%s\n' "$output"
+          test "$rc" -eq 2
+          printf '%s\n' "$output" | grep -q 'usage: seedcrack' 
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Package standalone GUI executable
+        shell: pwsh
+        working-directory: engine
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          python -m PyInstaller --clean --noconfirm --onefile --windowed `
+            --name XaeroSeed_GUI --add-binary 'build/seedcrack.exe;build' `
+            --collect-submodules src gui.py
+          if (!(Test-Path 'dist/XaeroSeed_GUI.exe')) { throw 'Windows EXE not created' }
+          Write-Host "EXE size: $((Get-Item 'dist/XaeroSeed_GUI.exe').Length) bytes"
+
+      - name: Upload complete Windows application
+        uses: actions/upload-artifact@v4
+        with:
+          name: XaeroSeed_GUI_Windows
+          path: |
+            engine/dist/XaeroSeed_GUI.exe
+            engine/LICENSE
+            engine/GUI_README.md
+          if-no-files-found: error
+          retention-days: 14
